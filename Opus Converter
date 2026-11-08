@@ -1,0 +1,88 @@
+#!/bin/bash
+#Dependencias : OpusTags ; ffmpeg
+
+RAIZ="${1:-.}"
+RAIZ="$(cd "$RAIZ" && pwd)"          # ruta absoluta, sin "/" final
+EXTENSIONES=("mp3" "flac" "wav" "m4a" "ogg" "aac" "wma")
+BORRAR_ORIGINAL="${BORRAR_ORIGINAL:-1}"
+
+TRASH="$RAIZ/.trash_opus"             # papelera única en la raíz
+
+shopt -s nullglob nocaseglob globstar
+
+es_audio() {
+    local ext="${1##*.}"
+    ext="${ext,,}"
+    for e in "${EXTENSIONES[@]}"; do
+        [[ "$ext" == "$e" ]] && return 0
+    done
+    return 1
+}
+
+for archivo in "$RAIZ"/**/*; do
+    [ -f "$archivo" ] || continue
+    es_audio "$archivo" || continue
+
+    # Saltar lo que ya esté dentro de la papelera
+    case "$archivo" in
+        "$TRASH"/*) continue ;;
+    esac
+
+    base="${archivo%.*}"
+    salida="${base}.opus"
+
+    if [ -f "$salida" ]; then
+        echo "Ya existe: $salida — se omite"
+        continue
+    fi
+
+    echo "Procesando: $archivo"
+    dir="$(dirname "$archivo")"
+    tmp_cover="$(mktemp "$dir/.cover.XXXXXX.jpg")"
+
+    # 1) Extraer portada (puede no haber; no es crítico)
+    ffmpeg -i "$archivo" -an -vcodec copy "$tmp_cover" -y -loglevel error 2>/dev/null
+
+    # 2) Convertir a opus
+    if ! ffmpeg -i "$archivo" -vn -c:a libopus -b:a 96k "$salida" -y -loglevel error; then
+        echo "ERROR convirtiendo: $archivo — se conserva el original"
+        rm -f "$tmp_cover"
+        [ -f "$salida" ] && rm -f "$salida"
+        continue
+    fi
+
+    # 3) Verificar que el .opus sea válido
+    if [ ! -s "$salida" ]; then
+        echo "ERROR: $salida vacío o inexistente — se conserva el original"
+        rm -f "$tmp_cover" "$salida"
+        continue
+    fi
+
+    # 4) Insertar portada si existe
+    if [ -f "$tmp_cover" ] && [ -s "$tmp_cover" ]; then
+        /home/cccp/.local/bin/opustags --set-cover "$tmp_cover" "$salida" -i
+    fi
+    rm -f "$tmp_cover"
+
+    # 5) Mover el original a la papelera centralizada, replicando la estructura
+    if [ "$BORRAR_ORIGINAL" = "1" ]; then
+        rel="${archivo#"$RAIZ"/}"                 # ruta relativa respecto a la raíz
+        destino="$TRASH/$rel"                     # p.ej. .trash_opus/Album/CD1/cancion.mp3
+
+        mkdir -p -- "$(dirname "$destino")"
+
+        # Si ya existe un archivo con ese nombre en la papelera, no lo pisamos
+        if [ -e "$destino" ]; then
+            destino="${destino%.*}.$(date +%s).${destino##*.}"
+            echo "Aviso: ya existía en papelera, renombrado a: $destino"
+        fi
+
+        if mv -- "$archivo" "$destino"; then
+            echo #"OK: $archivo -> $salida (original movido a $destino)"
+        else
+            echo "OK: $archivo -> $salida (NO se pudo mover el original)"
+        fi
+    else
+        echo "OK: $archivo -> $salida (original conservado)"
+    fi
+done
